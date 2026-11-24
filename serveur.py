@@ -142,7 +142,7 @@ def api_voix():
             if not CLE_ELEVEN:
                 return jsonify(erreur="Pas de clé ElevenLabs dans .env"), 400
             r = appel(f"https://api.elevenlabs.io/v1/text-to-speech/{urllib.parse.quote(voix)}/stream"
-                      f"?output_format=mp3_44100_128",
+                      f"?output_format=mp3_22050_32",
                       {"text": texte, "model_id": modele or "eleven_flash_v2_5"}, {"xi-api-key": CLE_ELEVEN})
             return Response(_flux(r), mimetype="audio/mpeg", headers={"Cache-Control": "no-store"})
         if fournisseur == "openai":
@@ -224,6 +224,9 @@ def _reglages():
     return [r] if r != "?" else _REFLEXION
 
 
+VOCABULAIRE = ["Zak", "ZAKMETRE", "maître d'œuvre", "contractant général", "EMOP", "L&A", "DPGF", "CCTP",
+               "plan de repérage", "lot peinture", "chantier", "Hautepierre", "Strasbourg", "Vilogia", "NinjaStorm",
+               "maître d'ouvrage", "bureau de contrôle", "coordonnateur SPS", "DCE", "indice", "finition"]
 MODELES_SCRIBE = [os.environ.get("SCRIBE_MODEL", "").strip(), "scribe_v3", "scribe_v2"]
 
 
@@ -236,11 +239,18 @@ def api_transcrire():
     audio = request.get_data(cache=False)
     if len(audio) < 3000:
         return jsonify(texte="", t_ms=0)
+    # mots que la dictée doit bien reconnaître (« L&A » et pas « LER », « maître d'œuvre » et pas « médecin »)
+    # + les noms du chantier en cours, envoyés par la page (en-tête X-Mots, séparés par « | »)
+    extra = [m.strip()[:50] for m in urllib.parse.unquote(request.headers.get("X-Mots", "")).split("|") if m.strip()]
+    mots = [m for m in dict.fromkeys(VOCABULAIRE + extra) if not re.search(r"[<>{}\[\]\\]", m)][:90]
     t0 = time.time()
     derniere = None
-    for modele in [m for m in MODELES_SCRIBE if m]:
+    essais = [(m, True) for m in MODELES_SCRIBE if m] + [(m, False) for m in MODELES_SCRIBE if m]
+    for modele, avec_mots in essais:
         limite = "----zakmetre" + uuid.uuid4().hex
-        champs = [("model_id", modele), ("language_code", "fr"), ("tag_audio_events", "false")]
+        champs = [("model_id", modele), ("language_code", "fr"), ("tag_audio_events", "false"), ("temperature", "0")]
+        if avec_mots:
+            champs += [("keyterms", m) for m in mots]
         corps = b"".join(f"--{limite}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode() for k, v in champs)
         corps += (f"--{limite}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"micro.wav\"\r\n"
                   f"Content-Type: audio/wav\r\n\r\n").encode() + audio + f"\r\n--{limite}--\r\n".encode()
@@ -249,7 +259,8 @@ def api_transcrire():
         try:
             r = urllib.request.urlopen(req, timeout=30)
             d = json.loads(r.read().decode("utf-8"))
-            return jsonify(texte=str(d.get("text") or "").strip()[:500], t_ms=int((time.time() - t0) * 1000), modele=modele)
+            return jsonify(texte=str(d.get("text") or "").strip()[:500], t_ms=int((time.time() - t0) * 1000), modele=modele,
+                           vocabulaire=avec_mots)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300].replace(CLE_ELEVEN, "***")
             derniere = f"le service a refusé ({e.code}) : {detail}"
@@ -262,6 +273,104 @@ def api_transcrire():
     if derniere and ("401" in derniere or "missing_permissions" in derniere or "permission" in derniere.lower()):
         derniere += " — la clé ElevenLabs n'a pas le droit « Speech to Text » : modifie-la sur elevenlabs.io (Access)."
     return jsonify(erreur=f"Dictée impossible : {derniere}"), 502
+
+
+CONSIGNE_ASSISTANT = """Tu es Zak, l'assistant vocal de ZAKMETRE (outil qui fait les DPGF et CCTP d'un maître d'œuvre du
+bâtiment, sociétés EMOP et L&A). Tu parles français, tu tutoies, 1 ou 2 phrases courtes et naturelles (lues à voix
+haute : pas de liste, pas de symbole, pas d'abréviation compliquée ; dis « L et A », « DPGF »).
+
+TA MISSION DANS CE TEST : créer un nouveau chantier. Il te faut 4 informations :
+  nom (le nom du chantier, ex. « Hôpital de Hautepierre »), ville, role, societe.
+  role : "maitre_oeuvre" ou "contractant_general" (rien d'autre).
+  societe : "EMOP" ou "L&A" (rien d'autre).
+Demande UNE information à la fois, celle qui manque, en commençant par le nom.
+
+LA DICTÉE PEUT SE TROMPER (le texte vient d'un micro) :
+- corrige seulement si c'est évident d'après le contexte : « LER », « l'A », « L et A », « Léa » -> L&A ;
+  « haute pierre », « hôpital de Pierre » quand on parle de Strasbourg -> Hautepierre ; « mettre d'œuvre » -> maître d'œuvre ;
+- si tu corriges un NOM (chantier, ville), dis-le pour que la personne vérifie (« Hautepierre, c'est bien ça ? ») ;
+- si la réponse ne correspond à AUCUNE option attendue (ex. tu attends maître d'œuvre ou contractant général et tu lis
+  « médecin »), NE DEVINE PAS : ne remplis rien et redemande gentiment en rappelant les 2 choix ;
+- n'invente jamais une information qui n'a pas été dite.
+
+QUAND LES 4 INFORMATIONS SONT LÀ : résume en une phrase et demande confirmation (attend = "confirmation").
+Si la personne confirme clairement (oui, c'est bon, vas-y, valide…) alors confirme = true et annonce que le chantier
+est créé (c'est un test : rien n'est créé pour de vrai). Si elle corrige quelque chose, mets à jour et redemande confirmation.
+Si elle parle d'autre chose, réponds brièvement puis reviens à l'information qui manque.
+
+Réponds UNIQUEMENT en JSON :
+{"reponse": "…", "fiche": {"nom": "…" ou null, "ville": "…" ou null, "role": "…" ou null, "societe": "…" ou null},
+ "attend": "nom" | "ville" | "role" | "societe" | "confirmation" | "rien", "confirme": false}"""
+
+ROLES = {"maitre_oeuvre", "contractant_general"}
+SOCIETES = {"EMOP", "L&A"}
+
+
+@app.post("/api/assistant")
+def api_assistant():
+    """Une étape de conversation : la page envoie la phrase, l'historique et la fiche ; Gemini répond, le serveur
+    VÉRIFIE (rôle et société parmi les choix possibles, chantier « créé » seulement après un oui explicite)."""
+    if not CLE_GEMINI:
+        return jsonify(erreur="Pas de clé Gemini"), 400
+    d = request.get_json(silent=True) or {}
+    texte = str(d.get("texte") or "").strip()[:500]
+    if not texte:
+        return jsonify(erreur="Rien entendu"), 400
+    fiche = {k: (str(v)[:80] if v else None) for k, v in (d.get("fiche") or {}).items() if k in ("nom", "ville", "role", "societe")}
+    attend_avant = str(d.get("attend") or "nom")
+    histo = [h for h in (d.get("historique") or []) if isinstance(h, dict)][-12:]
+    tours = [{"role": "user" if h.get("qui") == "toi" else "model", "parts": [{"text": str(h.get("texte") or "")[:600]}]}
+             for h in histo if h.get("texte")]
+    etat = f"FICHE ACTUELLE : {json.dumps(fiche, ensure_ascii=False)} ; tu attendais : {attend_avant}.\nLa personne dit : {texte}"
+    contenu = tours + [{"role": "user", "parts": [{"text": etat}]}]
+    t0 = time.time()
+    derniere = None
+    for reflexion in _reglages():
+        cfg = {"responseMimeType": "application/json", "temperature": 0.2}
+        if reflexion:
+            cfg["thinkingConfig"] = reflexion
+        try:
+            r = appel(f"https://generativelanguage.googleapis.com/v1beta/models/{MODELE_GEMINI}:generateContent",
+                      {"systemInstruction": {"parts": [{"text": CONSIGNE_ASSISTANT}]}, "contents": contenu, "generationConfig": cfg},
+                      {"x-goog-api-key": CLE_GEMINI}, delai=30)
+            g = json.loads(r.read().decode("utf-8"))
+            sortie = "".join(p.get("text", "") for p in g["candidates"][0]["content"]["parts"] if not p.get("thought"))
+            m = re.search(r"\{.*\}", sortie, re.S)
+            res = json.loads(m.group(0)) if m else {}
+            _BON_REGLAGE[MODELE_GEMINI] = reflexion
+            break
+        except Erreur as e:
+            derniere = str(e)
+            if "400" in derniere and reflexion:
+                continue
+            return jsonify(erreur=f"Zak n'a pas pu répondre : {derniere}"), 502
+        except (KeyError, IndexError, ValueError):
+            return jsonify(erreur="Zak n'a pas pu répondre (réponse illisible)"), 502
+    else:
+        return jsonify(erreur=f"Zak n'a pas pu répondre : {derniere}"), 502
+    # ---- contrôles : l'IA propose, le serveur dispose
+    nf = dict(fiche)
+    for k, v in (res.get("fiche") or {}).items():
+        if k in ("nom", "ville") and v:
+            nf[k] = str(v).strip()[:80]
+        elif k == "role" and v in ROLES:
+            nf[k] = v
+        elif k == "societe" and v in SOCIETES:
+            nf[k] = v
+    manque = [k for k in ("nom", "ville", "role", "societe") if not nf.get(k)]
+    attend = str(res.get("attend") or "")
+    if manque and attend in ("confirmation", "rien", ""):
+        attend = manque[0]
+    cree = bool(res.get("confirme")) and attend_avant == "confirmation" and not manque
+    if not manque:
+        attend = "rien" if cree else "confirmation"      # jamais « créé » sans un oui juste après le résumé
+    return jsonify(reponse=str(res.get("reponse") or "")[:600], fiche=nf, attend=attend, cree=cree,
+                   t_ms=int((time.time() - t0) * 1000))
+
+
+@app.get("/assistant")
+def page_assistant():
+    return send_from_directory(ICI, "assistant.html")
 
 
 @app.post("/api/repondre")

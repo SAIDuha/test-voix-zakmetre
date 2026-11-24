@@ -19,3 +19,13 @@ TEST VOIX — futur assistant vocal de ZAKMETRE
 
 C'est un test : l'assistant ne fait rien pour de vrai (pas de chantier créé).
 Envoyez à Claude une capture des tableaux (PAS du fichier .env).
+
+NOUVEAU : l'ASSISTANT (page /assistant)
+  Sur le PC : http://127.0.0.1:5050/assistant — en ligne : https://test-voix-zakmetre.onrender.com/assistant
+  Zak crée un chantier avec toi, à la voix : nom, ville, rôle (maître d'œuvre / contractant général), société (EMOP / L&A).
+  - Il retient la conversation ; la fiche du chantier se remplit en haut de l'écran.
+  - La dictée connaît le vocabulaire (L&A, EMOP, maître d'œuvre, DPGF…) et le nom du chantier en cours.
+  - Une réponse impossible (« médecin » au lieu de maître d'œuvre) n'est jamais acceptée : Zak redemande.
+  - Rien n'est « créé » sans un « oui » juste après le résumé (contrôlé par le serveur, pas seulement par l'IA).
+  - Le micro garde 0,4 s avant l'appui : le début de la phrase n'est plus coupé.
+  C'est un test : rien n'est créé pour de vrai.
