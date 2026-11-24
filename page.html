@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test voix — assistant ZAKMETRE</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:0;background:#f4f2ec;color:#1d2a24}
+  header{background:#1f4d3a;color:#fff;padding:14px 22px}
+  header h1{margin:0;font-size:20px;font-weight:600}
+  header p{margin:4px 0 0;font-size:13px;opacity:.85}
+  main{max-width:1000px;margin:0 auto;padding:18px}
+  section{background:#fff;border:1px solid #ddd8cc;border-radius:12px;padding:16px 18px;margin-bottom:16px}
+  h2{font-size:16px;margin:0 0 10px}
+  textarea{width:100%;box-sizing:border-box;font:inherit;font-size:15px;padding:8px;border:1px solid #ccc;border-radius:8px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  td,th{padding:7px 6px;border-top:1px solid #eee;text-align:left;vertical-align:middle}
+  th{font-weight:600;color:#555;font-size:12px}
+  button{font:inherit;font-size:14px;padding:6px 12px;border-radius:8px;border:1px solid #1f4d3a;background:#fff;color:#1f4d3a;cursor:pointer}
+  button:hover{background:#eef5f1}
+  .temps{font-variant-numeric:tabular-nums;font-weight:600}
+  .rapide{color:#1e7a4c}.moyen{color:#a86a00}.lent{color:#c0392b}
+  .err{color:#c0392b;font-size:13px}
+  .petit{font-size:12px;color:#777}
+  #parler{display:block;width:100%;padding:26px;font-size:20px;border-radius:14px;background:#1f4d3a;color:#fff;border:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:none}
+  #parler.actif{background:#c0392b}
+  .ligne{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+  select{font:inherit;font-size:14px;padding:5px;border-radius:8px}
+  .bulle{background:#f6f4ee;border-radius:10px;padding:10px 12px;margin:8px 0;font-size:15px}
+  .etat{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;margin-right:6px}
+  .oui{background:#e3f2e8;color:#1e7a4c}.non{background:#f6e3e1;color:#c0392b}
+</style>
+</head>
+<body>
+<header>
+  <h1>Test voix — futur assistant de ZAKMETRE</h1>
+  <p>Page de test séparée : ZAKMETRE n'est pas touché. Les clés restent dans le fichier .env, sur ton PC.</p>
+</header>
+<main>
+  <section>
+    <h2>Clés trouvées</h2>
+    <div id="cles">…</div>
+  </section>
+
+  <section>
+    <h2>1. Écouter les voix</h2>
+    <p class="petit">La même phrase lue par chaque voix. « 1er son » = temps entre le clic et le premier son entendu.</p>
+    <textarea id="phrase" rows="2">J'ai lu 3 plans et 14 lignes. La page 2 dit deux fois six portes : je compte 12 portes, c'est bon pour toi ?</textarea>
+    <div class="ligne">
+      <label>Modèle ElevenLabs : <select id="modeleEleven"></select></label>
+      <button id="toutes">Écouter toutes les voix à la suite</button>
+    </div>
+    <table>
+      <thead><tr><th>Service</th><th>Voix</th><th></th><th>1er son</th><th>Note (1 à 5)</th></tr></thead>
+      <tbody id="voix"></tbody>
+    </table>
+    <p class="err" id="errVoix"></p>
+  </section>
+
+  <section>
+    <h2>2. Parler à l'assistant (chronomètre)</h2>
+    <p class="petit">Choisis une voix, puis <b>maintiens le bouton</b> (ou la barre espace) pendant que tu parles, et lâche.
+      Exemple : « Salut Zak, on a un nouveau chantier, la cible c'est l'hôpital de Hautepierre ».</p>
+    <div class="ligne"><label>Voix de la réponse : <select id="voixConv"></select></label></div>
+    <div style="margin:6px 0 10px">Dictée (micro → texte) :
+      <select id="dictee"><option value="scribe">ElevenLabs Scribe (marche partout)</option><option value="chrome">Chrome (gratuit, bloqué sur certains PC)</option></select></div>
+    <div style="margin:0 0 10px">Micro :
+      <select id="micro" style="min-width:320px"><option value="">(clique sur « Tester le micro » pour voir la liste)</option></select>
+      <button id="testMicro" type="button">Tester le micro</button>
+      <span style="display:inline-block;width:200px;height:12px;background:#e5e5e5;border-radius:6px;vertical-align:middle;margin-left:8px">
+        <span id="niveau" style="display:block;height:12px;width:0;background:#2e7d32;border-radius:6px"></span></span>
+      <span id="niveauTxt" style="font-size:13px;color:#666"></span></div>
+    <button id="parler">Maintenir pour parler</button>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <input id="ecrit" type="text" placeholder="…ou écris ta phrase ici et appuie sur Entrée (si le micro ne marche pas)"
+             style="flex:1;padding:10px;font-size:15px;border:1px solid #ccc;border-radius:8px">
+    </div>
+    <div id="conv"></div>
+    <table>
+      <thead><tr><th>Voix</th><th>Comprendre + répondre (Gemini)</th><th>Avant le 1er son (total)</th></tr></thead>
+      <tbody id="mesures"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+var $ = function (id) { return document.getElementById(id); };
+var ETAT = null, LISTE = [];
+
+function echapper(t) { return String(t == null ? "" : t).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+function classe(s) { return s < 1.2 ? "rapide" : s < 2.5 ? "moyen" : "lent"; }
+function urlVoix(v, texte) {
+  var p = new URLSearchParams({ f: v.f, voix: v.voix, texte: texte });
+  if (v.f === "eleven") p.set("modele", $("modeleEleven").value);
+  return "/api/voix?" + p.toString();
+}
+
+// lit un texte ; renvoie une promesse { secondes avant le 1er son } ou une erreur lisible
+// iPhone : un son ne peut partir que d'un lecteur « débloqué » par un toucher. On garde UN seul lecteur,
+// débloqué au 1er appui sur le bouton, et on s'en sert pour toutes les réponses de Zak.
+var LECTEUR = new Audio(), lecteurPret = false;
+var SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+function debloquerSon() {
+  if (lecteurPret) return;
+  lecteurPret = true;
+  try { LECTEUR.src = SILENCE; var p = LECTEUR.play(); if (p) p.catch(function () { lecteurPret = false; }); } catch (e) { lecteurPret = false; }
+}
+function jouer(v, texte) {
+  return new Promise(function (ok, ko) {
+    var t0 = performance.now(), url = urlVoix(v, texte), a = LECTEUR, fini = false;
+    var surPlay = function () { if (!fini) { fini = true; nettoyer(); ok({ s: (performance.now() - t0) / 1000, audio: a }); } };
+    var surErreur = function () {
+      if (fini) return; fini = true; nettoyer();
+      fetch(url).then(function (r) { return r.json(); }).then(function (d) { ko(d.erreur || "son illisible"); })
+        .catch(function () { ko("son illisible"); });
+    };
+    var nettoyer = function () { a.removeEventListener("playing", surPlay); a.removeEventListener("error", surErreur); };
+    a.addEventListener("playing", surPlay); a.addEventListener("error", surErreur);
+    a.src = url;
+    a.play().catch(function () {});
+  });
+}
+
+function attendreFin(a) { return new Promise(function (ok) { if (a.ended) ok(); else a.addEventListener("ended", ok, { once: true }); }); }
+
+function chargerVoix() {
+  LISTE = [];
+  if (ETAT.gemini) ETAT.voix_gemini.forEach(function (n) { LISTE.push({ f: "gemini", service: "Gemini", voix: n, nom: n }); });
+  if (ETAT.openai) ETAT.voix_openai.forEach(function (n) { LISTE.push({ f: "openai", service: "OpenAI", voix: n, nom: n }); });
+  var fin = function () {
+    $("voix").innerHTML = LISTE.map(function (v, i) {
+      return "<tr><td>" + v.service + "</td><td>" + echapper(v.nom) + (v.info ? ' <span class="petit">' + echapper(v.info) + "</span>" : "") +
+        '</td><td><button data-i="' + i + '">Écouter</button></td><td class="temps" id="t' + i + '">—</td>' +
+        '<td><select data-note="' + i + '"><option></option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></td></tr>';
+    }).join("") || '<tr><td colspan="5">Aucune voix : ajoute au moins une clé dans .env</td></tr>';
+    $("voixConv").innerHTML = LISTE.map(function (v, i) { return '<option value="' + i + '">' + v.service + " — " + echapper(v.nom) + "</option>"; }).join("");
+    document.querySelectorAll("[data-i]").forEach(function (b) {
+      b.onclick = function () { ecouter(+b.dataset.i); };
+    });
+  };
+  if (!ETAT.eleven) return fin();
+  fetch("/api/voix_eleven").then(function (r) { return r.json(); }).then(function (d) {
+    if (d.erreur) $("errVoix").textContent = "ElevenLabs : " + d.erreur;
+    (d.voix || []).forEach(function (v) { LISTE.unshift({ f: "eleven", service: "ElevenLabs", voix: v.id, nom: v.nom, info: v.info }); });
+    fin();
+  }).catch(fin);
+}
+
+function ecouter(i) {
+  var v = LISTE[i], cel = $("t" + i);
+  cel.textContent = "…"; cel.className = "temps";
+  return jouer(v, $("phrase").value).then(function (r) {
+    cel.textContent = r.s.toFixed(2).replace(".", ",") + " s"; cel.className = "temps " + classe(r.s);
+    return attendreFin(r.audio);
+  }).catch(function (e) { cel.innerHTML = '<span class="err">' + echapper(e) + "</span>"; });
+}
+
+$("toutes").onclick = function () {
+  var i = 0;
+  (function suite() { if (i < LISTE.length) ecouter(i++).then(suite); })();
+};
+
+// ------------------------------------------------------------------ appuyer pour parler
+var flux = null, ctx = null, source = null, proc = null, morceaux = [], enCours = false, tLache = 0;
+
+// ---- reconnaissance de la voix par Chrome (gratuite, en direct) : Gemini reçoit le TEXTE, pas le son.
+// Plus rapide, et Gemini ne peut plus « inventer » une phrase à partir d'un son mal capté.
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition, rec = null, dit = "", provisoire = "", deja = "", srOk = !!SR, erreurMicro = "", scribe = false, dicteeMs = 0;
+
+function demarrer() {
+  debloquerSon();
+  if (scribe || !srOk) return demarrerAudio();
+  if (enCours) return;
+  enCours = true; dit = ""; provisoire = ""; deja = ""; erreurMicro = "";
+  $("parler").classList.add("actif"); $("parler").textContent = "Je t'écoute… (lâche pour envoyer)";
+  ecouterMicro();
+}
+
+function ecouterMicro() {
+  rec = new SR(); rec.lang = "fr-FR"; rec.interimResults = true; rec.continuous = true;
+  rec.onresult = function (e) {
+    var fin = "", prov = "";
+    for (var i = 0; i < e.results.length; i++) { if (e.results[i].isFinal) fin += e.results[i][0].transcript; else prov += e.results[i][0].transcript; }
+    dit = fin; provisoire = prov;
+    $("parler").textContent = "« " + (deja + " " + fin + prov).trim() + " »";
+  };
+  rec.onerror = function (e) {
+    var msg = { "no-speech": "Chrome n'a entendu aucune parole (micro trop faible ou mauvais micro choisi dans Chrome).",
+                "audio-capture": "Chrome n'arrive pas à utiliser le micro (mauvais micro choisi ou micro occupé).",
+                "not-allowed": "Le micro est refusé pour cette page : autorise-le (icône à gauche de l'adresse).",
+                "service-not-allowed": "La reconnaissance de la voix est bloquée dans Chrome.",
+                "network": "La reconnaissance de la voix de Chrome a besoin d'internet : vérifie la connexion." }[e.error];
+    if (msg) { erreurMicro = msg; }
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") { srOk = false; }
+  };
+  rec.onend = function () {
+    var tout = (deja + " " + dit + " " + provisoire).replace(/\s+/g, " ").trim();
+    if (enCours) { deja = tout; dit = ""; provisoire = ""; ecouterMicro(); return; }   // Chrome s'est arrêté seul : on continue
+    rec = null; envoyerTexte(tout);
+  };
+  try { rec.start(); } catch (e) { srOk = false; enCours = false; demarrerAudio(); }
+}
+
+function arreter() {
+  if (scribe || (!srOk && !rec)) return arreterAudio();
+  if (!enCours) return;
+  enCours = false; tLache = performance.now();
+  $("parler").classList.remove("actif"); $("parler").textContent = "Maintenir pour parler";
+  if (rec) rec.stop();
+}
+
+function envoyerTexte(texte) {
+  var v = LISTE[+$("voixConv").value];
+  var bloc = document.createElement("div");
+  $("conv").prepend(bloc);
+  if (!texte) { bloc.innerHTML = '<div class="bulle err">' + echapper(erreurMicro || "Rien entendu : parle un peu plus longtemps, près du micro.") + '</div>'; return; }
+  bloc.innerHTML = '<div class="bulle"><b>Toi :</b> ' + echapper(texte) + '</div><div class="bulle petit">Zak réfléchit…</div>';
+  fetch("/api/repondre", { method: "POST", body: JSON.stringify({ texte: texte }), headers: { "Content-Type": "application/json" } })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { suite(d, bloc, v); })
+    .catch(function () { bloc.innerHTML = '<div class="bulle err">Le serveur de test ne répond pas.</div>'; });
+}
+
+function suite(d, bloc, v) {
+  if (d.erreur) { bloc.innerHTML = '<div class="bulle err">' + echapper(d.erreur) + "</div>"; return; }
+  if (!d.entendu) { bloc.innerHTML = '<div class="bulle petit">Rien entendu (trop court ou que du bruit).</div>'; return; }
+  bloc.innerHTML = '<div class="bulle"><b>Toi :</b> ' + echapper(d.entendu) + '</div><div class="bulle"><b>Zak :</b> ' + echapper(d.reponse) + "</div>";
+  if (!v || !d.reponse) return;
+  jouer(v, d.reponse).then(function (r) {
+    var total = (performance.now() - tLache) / 1000;
+    var ligne = document.createElement("tr");
+    var dic = dicteeMs ? "dictée " + (dicteeMs / 1000).toFixed(2).replace(".", ",") + " s + " : ""; dicteeMs = 0;
+    ligne.innerHTML = "<td>" + v.service + " — " + echapper(v.nom) + "</td><td class=\"temps\">" + dic + (d.t_ms / 1000).toFixed(2).replace(".", ",") +
+      ' s</td><td class="temps ' + classe(total) + '">' + total.toFixed(2).replace(".", ",") + " s</td>";
+    $("mesures").prepend(ligne);
+  }).catch(function (e) { bloc.innerHTML += '<div class="bulle err">Voix : ' + echapper(e) + "</div>"; });
+}
+
+// ---- secours (navigateur sans reconnaissance de la voix) : le son est envoyé à Gemini
+function demarrerAudio() {
+  if (enCours) return;
+  enCours = true; morceaux = [];
+  // Chrome crée le « moteur son » en pause s'il n'est pas lancé directement par le clic : on le crée et on le
+  // réveille ICI, pendant l'appui (sinon il n'enregistre que du silence -> « Rien entendu »)
+  ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") ctx.resume();
+  $("parler").classList.add("actif"); $("parler").textContent = "Je t'écoute… (lâche pour envoyer)";
+  var go = function () {
+    ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+    source = ctx.createMediaStreamSource(flux);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    proc.onaudioprocess = function (e) {
+      var x = e.inputBuffer.getChannelData(0);
+      afficherNiveau(x);
+      if (enCours) morceaux.push(new Float32Array(x));
+    };
+    source.connect(proc); proc.connect(ctx.destination);
+  };
+  if (flux) return go();
+  // réduction de bruit, anti-écho et réglage du volume du navigateur : gratuits, toujours activés
+  ouvrirMicro()
+    .then(function (f) { flux = f; if (enCours) go(); })
+    .catch(function () { enCours = false; $("parler").classList.remove("actif"); $("parler").textContent = "Micro refusé : autorise le micro dans Chrome"; });
+}
+
+// ---- choix du micro : la page prend CE micro (pas celui par défaut de Chrome, qui peut être celui du PC)
+function contraintes() {
+  var id = $("micro").value;
+  var a = { noiseSuppression: true, echoCancellation: true, autoGainControl: true };
+  if (id) a.deviceId = { exact: id };
+  return { audio: a };
+}
+function ouvrirMicro() {
+  return navigator.mediaDevices.getUserMedia(contraintes()).then(function (f) { listerMicros(); return f; });
+}
+function listerMicros() {
+  return navigator.mediaDevices.enumerateDevices().then(function (ds) {
+    var micros = ds.filter(function (d) { return d.kind === "audioinput" && d.deviceId !== "default" && d.deviceId !== "communications"; });
+    if (!micros.length || !micros[0].label) return;
+    var avant = $("micro").value;
+    $("micro").innerHTML = micros.map(function (d) { return '<option value="' + d.deviceId + '">' + echapper(d.label) + "</option>"; }).join("");
+    var garde = micros.filter(function (d) { return d.deviceId === avant; })[0] ||
+                micros.filter(function (d) { return /jabra|casque|headset|evolve|usb/i.test(d.label); })[0] || micros[0];
+    $("micro").value = garde.deviceId;
+  });
+}
+var niveauMax = 0;
+function afficherNiveau(x) {
+  var m = 0; for (var i = 0; i < x.length; i += 16) { var a = Math.abs(x[i]); if (a > m) m = a; }
+  niveauMax = Math.max(niveauMax * 0.9, m);
+  var pct = Math.min(100, Math.round(niveauMax * 250));
+  $("niveau").style.width = pct + "%"; $("niveau").style.background = pct < 8 ? "#c62828" : "#2e7d32";
+  $("niveauTxt").textContent = pct < 8 ? "trop faible" : "ok";
+}
+function changerMicro() {
+  if (flux) { flux.getTracks().forEach(function (t) { t.stop(); }); flux = null; }
+  if (proc) { try { proc.disconnect(); source.disconnect(); } catch (e) {} proc = null; }
+}
+var testEnCours = false;
+function testerMicro() {
+  changerMicro();
+  ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") ctx.resume();
+  ouvrirMicro().then(function (f) {
+    flux = f;
+    source = ctx.createMediaStreamSource(flux);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    proc.onaudioprocess = function (e) { afficherNiveau(e.inputBuffer.getChannelData(0)); };
+    source.connect(proc); proc.connect(ctx.destination);
+    $("testMicro").textContent = "Parle : la barre doit bouger…";
+    setTimeout(function () { $("testMicro").textContent = "Tester le micro"; }, 5000);
+  }).catch(function () { $("niveauTxt").textContent = "micro refusé ou introuvable"; });
+}
+
+function arreterAudio() {
+  if (!enCours) return;
+  enCours = false; tLache = performance.now();
+  $("parler").classList.remove("actif"); $("parler").textContent = "Maintenir pour parler";
+  if (proc) { proc.disconnect(); source.disconnect(); }
+  var maxi = 0;
+  morceaux.forEach(function (b) { for (var i = 0; i < b.length; i += 8) { var a = Math.abs(b[i]); if (a > maxi) maxi = a; } });
+  if (!morceaux.length || maxi < 0.003) {
+    var info = document.createElement("div");
+    info.innerHTML = '<div class="bulle err">Le micro n\'envoie aucun son. Clique sur l\'icône micro à droite de l\'adresse (en haut de Chrome) et choisis le bon micro, puis réessaie. Vérifie aussi que le micro n\'est pas coupé dans Windows.</div>';
+    $("conv").prepend(info); return;
+  }
+  var wav = versWav(morceaux, ctx.sampleRate);
+  var v = LISTE[+$("voixConv").value];
+  var bloc = document.createElement("div");
+  bloc.innerHTML = '<div class="bulle petit">Envoi…</div>';
+  $("conv").prepend(bloc);
+  if (scribe) {
+    // dictée par ElevenLabs Scribe, puis Gemini répond au texte
+    bloc.innerHTML = '<div class="bulle petit">Je t\'ai entendu, j\'écris…</div>';
+    fetch("/api/transcrire", { method: "POST", body: wav, headers: { "Content-Type": "audio/wav" } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        bloc.remove();
+        if (d.erreur) { var b2 = document.createElement("div"); b2.innerHTML = '<div class="bulle err">' + echapper(d.erreur) + "</div>"; $("conv").prepend(b2); return; }
+        dicteeMs = d.t_ms || 0;
+        envoyerTexte(d.texte || "");
+      })
+      .catch(function () { bloc.innerHTML = '<div class="bulle err">Le serveur de test ne répond pas.</div>'; });
+    return;
+  }
+  fetch("/api/parler", { method: "POST", body: wav, headers: { "Content-Type": "audio/wav" } })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.erreur) { bloc.innerHTML = '<div class="bulle err">' + echapper(d.erreur) + "</div>"; return; }
+      if (!d.entendu) { bloc.innerHTML = '<div class="bulle petit">Rien entendu (trop court ou que du bruit).</div>'; return; }
+      bloc.innerHTML = '<div class="bulle"><b>Toi :</b> ' + echapper(d.entendu) + '</div><div class="bulle"><b>Zak :</b> ' + echapper(d.reponse) + "</div>";
+      if (!v || !d.reponse) return;
+      jouer(v, d.reponse).then(function (r) {
+        var total = (performance.now() - tLache) / 1000;
+        var ligne = document.createElement("tr");
+        ligne.innerHTML = "<td>" + v.service + " — " + echapper(v.nom) + "</td><td class=\"temps\">" + (d.t_ms / 1000).toFixed(2).replace(".", ",") +
+          ' s</td><td class="temps ' + classe(total) + '">' + total.toFixed(2).replace(".", ",") + " s</td>";
+        $("mesures").prepend(ligne);
+      }).catch(function (e) { bloc.innerHTML += '<div class="bulle err">Voix : ' + echapper(e) + "</div>"; });
+    })
+    .catch(function () { bloc.innerHTML = '<div class="bulle err">Le serveur de test ne répond pas.</div>'; });
+}
+
+// son du micro -> WAV 16 kHz mono (format accepté par Gemini)
+function versWav(bouts, rate) {
+  var n = bouts.reduce(function (t, b) { return t + b.length; }, 0), tout = new Float32Array(n), k = 0;
+  bouts.forEach(function (b) { tout.set(b, k); k += b.length; });
+  var cible = 16000, pas = rate / cible, m = Math.floor(n / pas), pcm = new DataView(new ArrayBuffer(44 + m * 2));
+  var ecrire = function (o, s) { for (var i = 0; i < s.length; i++) pcm.setUint8(o + i, s.charCodeAt(i)); };
+  ecrire(0, "RIFF"); pcm.setUint32(4, 36 + m * 2, true); ecrire(8, "WAVE"); ecrire(12, "fmt ");
+  pcm.setUint32(16, 16, true); pcm.setUint16(20, 1, true); pcm.setUint16(22, 1, true);
+  pcm.setUint32(24, cible, true); pcm.setUint32(28, cible * 2, true); pcm.setUint16(32, 2, true); pcm.setUint16(34, 16, true);
+  ecrire(36, "data"); pcm.setUint32(40, m * 2, true);
+  for (var i = 0; i < m; i++) {
+    var x = Math.max(-1, Math.min(1, tout[Math.floor(i * pas)]));
+    pcm.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([pcm], { type: "audio/wav" });
+}
+
+var b = $("parler");
+$("ecrit").addEventListener("keydown", function (e) {
+  if (e.key === "Enter" && this.value.trim()) { e.preventDefault(); debloquerSon(); tLache = performance.now(); envoyerTexte(this.value.trim()); this.value = ""; }
+});
+b.addEventListener("pointerdown", function (e) { e.preventDefault(); demarrer(); });
+b.addEventListener("pointerup", arreter);
+b.addEventListener("pointercancel", arreter);
+b.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+document.addEventListener("keydown", function (e) { if (e.code === "Space" && !e.repeat && ["TEXTAREA", "INPUT"].indexOf(document.activeElement.tagName) < 0) { e.preventDefault(); demarrer(); } });
+document.addEventListener("keyup", function (e) { if (e.code === "Space" && ["TEXTAREA", "INPUT"].indexOf(document.activeElement.tagName) < 0) { e.preventDefault(); arreter(); } });
+
+fetch("/api/etat").then(function (r) { return r.json(); }).then(function (d) {
+  ETAT = d;
+  $("testMicro").onclick = testerMicro;
+  $("micro").onchange = function () { changerMicro(); testerMicro(); };
+  listerMicros();
+  if (!d.eleven) $("dictee").value = "chrome";
+  scribe = $("dictee").value === "scribe";
+  $("dictee").onchange = function () { scribe = this.value === "scribe"; };
+  $("cles").innerHTML = [["Gemini", d.gemini], ["ElevenLabs", d.eleven], ["OpenAI (facultatif)", d.openai]].map(function (x) {
+    return '<span class="etat ' + (x[1] ? "oui" : "non") + '">' + x[0] + " : " + (x[1] ? "oui" : "non") + "</span>";
+  }).join("");
+  $("modeleEleven").innerHTML = d.modeles_eleven.map(function (m) { return '<option value="' + m[0] + '">' + m[1] + "</option>"; }).join("");
+  chargerVoix();
+});
+</script>
+</body>
+</html>

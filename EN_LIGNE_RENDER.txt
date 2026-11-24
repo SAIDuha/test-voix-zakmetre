@@ -1,0 +1,13 @@
+METTRE LA PAGE DE TEST EN LIGNE (Render) — pour tester avec l'iPhone de n'importe où
+
+Réglages du service Render (Web Service) :
+  Build Command : pip install -r requirements.txt
+  Start Command : gunicorn serveur:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 90
+  Variables (Environment) :
+    GEMINI_API_KEY      = ta clé Gemini
+    ELEVENLABS_API_KEY  = ta clé ElevenLabs (Text to Speech + Speech to Text + Voices)
+    GEMINI_MODEL        = gemini-flash-lite-latest
+    MOT_DE_PASSE        = un mot de passe à toi (la page le demande ; n'importe quel identifiant)
+
+Ne jamais mettre les clés dans les fichiers : seulement dans « Environment » sur Render.
+Après les tests : supprimer le service (ou le mettre en pause) sur Render.

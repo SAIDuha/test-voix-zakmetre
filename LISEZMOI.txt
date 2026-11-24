@@ -1,0 +1,21 @@
+TEST VOIX — futur assistant vocal de ZAKMETRE
+(page séparée : ZAKMETRE n'est pas touché)
+
+1. Double-cliquez sur lancer.bat
+   - la 1re fois, il crée le fichier .env et l'ouvre : collez la clé Gemini (la même que ZAKMETRE)
+     et une clé ElevenLabs (compte gratuit sur elevenlabs.io > Developers > API Keys), enregistrez, fermez.
+   - relancez lancer.bat : la page s'ouvre dans le navigateur (http://127.0.0.1:5050). Utilisez Chrome.
+
+2. Partie 1 « Écouter les voix » : la même phrase lue par chaque voix, avec le temps avant le 1er son.
+   Mettez une note de 1 à 5. Choisissez le modèle ElevenLabs en haut (v4 Turbo, Flash 2.5, v4).
+   Astuce : sur elevenlabs.io, dans « Voice Library », filtrez Langue = Français et ajoutez 3 ou 4 voix
+   à votre compte : elles apparaîtront automatiquement dans la liste.
+
+3. Partie 2 « Parler à l'assistant » (Chrome écrit ce que vous dites, en direct) : choisissez une voix, MAINTENEZ le bouton (ou la barre espace)
+   pendant que vous parlez, lâchez. La page affiche ce que Gemini a compris, sa réponse, et les temps :
+     - « Comprendre + répondre » : le temps de Gemini
+     - « Avant le 1er son » : le temps total entre le moment où vous lâchez et le 1er mot entendu
+   Vert = rapide (moins de 1,2 s), orange = correct, rouge = lent (plus de 2,5 s).
+
+C'est un test : l'assistant ne fait rien pour de vrai (pas de chantier créé).
+Envoyez à Claude une capture des tableaux (PAS du fichier .env).
