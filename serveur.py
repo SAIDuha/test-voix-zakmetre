@@ -51,6 +51,8 @@ MOT_DE_PASSE = os.environ.get("MOT_DE_PASSE", "").strip()
 def _proteger():
     if not MOT_DE_PASSE:
         return None
+    if request.path.startswith("/relais/") or request.path == "/tel":
+        return None      # relais iPhone <-> ZAKMETRE : protégé par ses propres clés (voir plus bas), sans mot de passe
     a = request.authorization
     if a and a.password == MOT_DE_PASSE:
         return None
@@ -443,6 +445,211 @@ def api_parler():
             derniere = "réponse illisible"
             break
     return jsonify(erreur=f"Gemini n'a pas répondu : {derniere}"), 502
+
+
+# ================================================================== RELAIS « micro sur téléphone »
+# L'iPhone et ZAKMETRE (sur le PC) ne se parlent pas directement (pare-feu de l'entreprise) : les deux passent
+# par ce serveur. Il ne fait que transmettre : aucune clé d'IA n'est utilisée ici, tout le travail se fait sur le PC.
+#
+# Sécurité :
+#  - RELAIS_SECRET (même valeur ici et dans le .env de ZAKMETRE) ; sans lui, le relais est fermé ;
+#  - chaque liaison a un identifiant aléatoire ; les clés sont des signatures du secret (rien à stocker : une
+#    liaison survit au redémarrage du serveur) ; clé du PC et clé du téléphone sont différentes ;
+#  - le téléphone obtient sa clé avec un code à usage unique, valable 10 minutes (affiché par ZAKMETRE) ;
+#  - les essais de code faux sont limités.
+import hashlib
+import hmac
+import threading
+
+RELAIS_SECRET = os.environ.get("RELAIS_SECRET", "").strip()
+_RELAIS = {}                 # id -> {"n": dernier n°, "msgs": [...], "reps": {n: réponse}, "pc_vu": t, "tel_vu": t, "vu": t}
+_CODES = {}                  # code -> (id, expiration)
+_RATES = []                  # heures des codes faux
+_V = threading.Condition()
+RE_ID = re.compile(r"[A-Za-z0-9_-]{16,40}")
+RE_CODE = re.compile(r"[A-Z0-9]{6}")
+
+
+def _signature(qui, sid):
+    return hmac.new(RELAIS_SECRET.encode(), f"{qui}:{sid}".encode(), hashlib.sha256).hexdigest()
+
+
+def _autorise(qui, sid):
+    if not RELAIS_SECRET or not RE_ID.fullmatch(sid or ""):
+        return False
+    return hmac.compare_digest(request.headers.get("X-Cle", ""), _signature(qui, sid))
+
+
+def _liaison(sid):
+    """(appelée sous _V) la liaison, créée au besoin ; on oublie celles sans activité depuis 2 h."""
+    t = time.time()
+    for k in [k for k, v in _RELAIS.items() if t - v["vu"] > 7200]:
+        del _RELAIS[k]
+    if sid not in _RELAIS:
+        if len(_RELAIS) > 300:
+            return None
+        _RELAIS[sid] = {"n": 0, "msgs": [], "reps": {}, "pc_vu": 0, "tel_vu": 0, "vu": t, "liaisons": 0}
+    _RELAIS[sid]["vu"] = t
+    return _RELAIS[sid]
+
+
+def _refus():
+    return jsonify(erreur="Liaison refusée : rescanne le QR code affiché par ZAKMETRE."), 403
+
+
+@app.post("/relais/code")
+def relais_code():
+    """ZAKMETRE dépose le code à usage unique qu'il affiche (avec le QR code)."""
+    d = request.get_json(silent=True) or {}
+    sid, code = str(d.get("id") or ""), str(d.get("code") or "")
+    if not _autorise("pc", sid) or not RE_CODE.fullmatch(code):
+        return _refus()
+    with _V:
+        t = time.time()
+        for k in [k for k, v in _CODES.items() if v[1] < t or v[0] == sid]:
+            del _CODES[k]
+        _CODES[code] = (sid, t + 600)
+        _liaison(sid)
+    return jsonify(ok=True)
+
+
+@app.post("/relais/appairer")
+def relais_appairer():
+    """Le téléphone échange le code contre sa clé (une seule fois)."""
+    if not RELAIS_SECRET:
+        return jsonify(erreur="Le relais n'est pas réglé (RELAIS_SECRET manquant sur Render)."), 503
+    code = str((request.get_json(silent=True) or {}).get("code") or "").strip().upper().replace(" ", "")
+    with _V:
+        t = time.time()
+        _RATES[:] = [x for x in _RATES if t - x < 600]
+        if len(_RATES) >= 30:
+            return jsonify(erreur="Trop d'essais. Attends quelques minutes."), 429
+        v = _CODES.pop(code, None) if RE_CODE.fullmatch(code) else None
+        if not v or v[1] < t:
+            _RATES.append(t)
+            return jsonify(erreur="Code inconnu ou expiré : affiche un nouveau QR code dans ZAKMETRE."), 403
+        sid = v[0]
+        l = _liaison(sid)
+        if l:
+            l["tel_vu"] = t
+            l["liaisons"] += 1          # réveille ZAKMETRE : il affiche « téléphone relié » tout de suite
+        _V.notify_all()
+    return jsonify(id=sid, cle=_signature("tel", sid))
+
+
+@app.post("/relais/<sid>/message")
+def relais_message(sid):
+    """Le téléphone envoie ce qu'il a dit (son WAV en base64) ou écrit."""
+    if not _autorise("tel", sid):
+        return _refus()
+    d = request.get_json(silent=True) or {}
+    audio, texte = str(d.get("audio") or ""), str(d.get("texte") or "").strip()[:500]
+    if len(audio) > 3_000_000:
+        return jsonify(erreur="Message trop long : 1 minute maximum."), 413
+    if not audio and not texte:
+        return jsonify(erreur="Message vide."), 400
+    with _V:
+        l = _liaison(sid)
+        if l is None:
+            return jsonify(erreur="Relais plein, réessaie dans un moment."), 503
+        l["n"] += 1
+        l["tel_vu"] = time.time()
+        l["msgs"].append({"n": l["n"], "audio": audio, "texte": texte})
+        l["msgs"] = l["msgs"][-5:]
+        _V.notify_all()
+        n = l["n"]
+    return jsonify(n=n, pc_en_ligne=time.time() - l["pc_vu"] < 30)
+
+
+@app.get("/relais/<sid>/attendre")
+def relais_attendre(sid):
+    """ZAKMETRE attend les messages du téléphone (réponse dès qu'il y en a un, sinon au bout de 20 s)."""
+    if not _autorise("pc", sid):
+        return _refus()
+    try:
+        apres = int(request.args.get("apres") or 0)
+    except ValueError:
+        apres = 0
+    fin = time.time() + 20
+    with _V:
+        liaisons = (_liaison(sid) or {}).get("liaisons", 0)
+        while True:
+            l = _liaison(sid)
+            if l is None:
+                return jsonify(erreur="Relais plein."), 503
+            l["pc_vu"] = time.time()
+            nouveaux = [m for m in l["msgs"] if m["n"] > apres]
+            reste = fin - time.time()
+            if nouveaux or reste <= 0 or l["liaisons"] != liaisons:
+                break
+            _V.wait(min(reste, 5))
+        # n le plus haut connu : au redémarrage du relais, ZAKMETRE repart de là sans rater de message
+        return jsonify(messages=nouveaux, dernier=l["n"], tel_vu=l["tel_vu"])
+
+
+@app.post("/relais/<sid>/reponse")
+def relais_reponse_pc(sid):
+    """ZAKMETRE renvoie la réponse de Zak (texte + voix en mp3 base64) pour le téléphone."""
+    if not _autorise("pc", sid):
+        return _refus()
+    d = request.get_json(silent=True) or {}
+    try:
+        n = int(d.get("n"))
+    except (TypeError, ValueError):
+        return jsonify(erreur="Réponse sans numéro."), 400
+    rep = {"entendu": str(d.get("entendu") or "")[:500], "texte": str(d.get("texte") or "")[:1500],
+           "audio": str(d.get("audio") or "")[:2_000_000], "erreur": str(d.get("erreur") or "")[:300],
+           "action": str(d.get("action") or "")[:200]}
+    with _V:
+        l = _liaison(sid)
+        if l is None:
+            return jsonify(erreur="Relais plein."), 503
+        l["reps"][n] = rep
+        for k in sorted(l["reps"])[:-5]:
+            del l["reps"][k]
+        _V.notify_all()
+    return jsonify(ok=True)
+
+
+@app.get("/relais/<sid>/reponse")
+def relais_reponse_tel(sid):
+    """Le téléphone attend la réponse à son message n (jusqu'à 25 s, puis il redemande)."""
+    if not _autorise("tel", sid):
+        return _refus()
+    try:
+        n = int(request.args.get("n") or 0)
+    except ValueError:
+        n = 0
+    fin = time.time() + 25
+    with _V:
+        while True:
+            l = _liaison(sid)
+            if l is None:
+                return jsonify(erreur="Relais plein."), 503
+            l["tel_vu"] = time.time()
+            rep = l["reps"].get(n)
+            reste = fin - time.time()
+            if rep or reste <= 0:
+                break
+            _V.wait(min(reste, 5))
+        return jsonify(pret=bool(rep), **(rep or {}), pc_en_ligne=time.time() - l["pc_vu"] < 30)
+
+
+@app.get("/relais/<sid>/etat")
+def relais_etat(sid):
+    if not _autorise("tel", sid):
+        return _refus()
+    with _V:
+        l = _liaison(sid)
+        if l is None:
+            return jsonify(erreur="Relais plein."), 503
+        l["tel_vu"] = time.time()
+        return jsonify(pc_en_ligne=time.time() - l["pc_vu"] < 30)
+
+
+@app.get("/tel")
+def page_telephone():
+    return send_from_directory(ICI, "telephone.html")
 
 
 @app.get("/")

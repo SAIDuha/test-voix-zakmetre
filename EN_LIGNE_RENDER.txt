@@ -8,6 +8,15 @@ Réglages du service Render (Web Service) :
     ELEVENLABS_API_KEY  = ta clé ElevenLabs (Text to Speech + Speech to Text + Voices)
     GEMINI_MODEL        = gemini-flash-lite-latest
     MOT_DE_PASSE        = un mot de passe à toi (la page le demande ; n'importe quel identifiant)
+    RELAIS_SECRET       = le même mot secret que dans le .env de ZAKMETRE (micro sur téléphone)
 
 Ne jamais mettre les clés dans les fichiers : seulement dans « Environment » sur Render.
 Après les tests : supprimer le service (ou le mettre en pause) sur Render.
+
+MICRO SUR TÉLÉPHONE (ZAKMETRE v92)
+  Ce service sert aussi de RELAIS entre l'iPhone et ZAKMETRE (adresse /tel).
+  - Le relais ne fait que transmettre : la dictée, Zak et la voix tournent sur le PC.
+  - /tel et /relais/... ne demandent pas le mot de passe : ils sont protégés par RELAIS_SECRET
+    (clés signées + code à usage unique de 10 minutes).
+  - Sans RELAIS_SECRET, le relais reste fermé.
+  - Pour que le téléphone marche, ne mets PAS le service en pause pendant que tu utilises Zak.
