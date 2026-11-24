@@ -141,9 +141,10 @@ function verifierPc() {
 // ---------------- son de Zak (un seul lecteur, débloqué au 1er toucher : obligatoire sur iPhone)
 var LECTEUR = new Audio();
 var SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
-function jouer(b64) {
-  if (!b64) return;
-  try { LECTEUR.src = "data:audio/mpeg;base64," + b64; LECTEUR.play().catch(function () {}); } catch (e) {}
+function jouer(b64, url) {
+  if (!b64 && !url) return;
+  // url : la voix arrive en flux depuis le relais (elle commence à parler tout de suite)
+  try { LECTEUR.src = url || "data:audio/mpeg;base64," + b64; LECTEUR.play().catch(function () {}); } catch (e) {}
 }
 function couperZak() { try { LECTEUR.pause(); } catch (e) {} }
 
@@ -230,7 +231,7 @@ function envoyer(corps, apercu) {
     if (r.entendu) { bulle.textContent = r.entendu; bulle.classList.remove("attente"); } else bulle.remove();
     if (r.texte) ajouter("zak", echapper(r.texte));
     if (r.action) ajouter("ok", "✓ " + echapper(r.action));
-    jouer(r.audio);
+    jouer(r.audio, r.voix_url);
   }).catch(function (e) {
     bulle.remove();
     ajouter("err", echapper(typeof e === "string" ? e : "Pas de connexion."));

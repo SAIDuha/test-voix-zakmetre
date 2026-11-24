@@ -232,20 +232,10 @@ VOCABULAIRE = ["Zak", "ZAKMETRE", "maître d'œuvre", "contractant général", "
 MODELES_SCRIBE = [os.environ.get("SCRIBE_MODEL", "").strip(), "scribe_v3", "scribe_v2"]
 
 
-@app.post("/api/transcrire")
-def api_transcrire():
-    """Le son du micro -> texte, par ElevenLabs Scribe (un vrai outil de dictée : il écrit ce qu'il entend, il
-    n'invente pas de phrase). Marche aussi sur un PC d'entreprise où la dictée de Chrome est bloquée."""
-    if not CLE_ELEVEN:
-        return jsonify(erreur="Pas de clé ElevenLabs"), 400
-    audio = request.get_data(cache=False)
-    if len(audio) < 3000:
-        return jsonify(texte="", t_ms=0)
-    # mots que la dictée doit bien reconnaître (« L&A » et pas « LER », « maître d'œuvre » et pas « médecin »)
-    # + les noms du chantier en cours, envoyés par la page (en-tête X-Mots, séparés par « | »)
-    extra = [m.strip()[:50] for m in urllib.parse.unquote(request.headers.get("X-Mots", "")).split("|") if m.strip()]
-    mots = [m for m in dict.fromkeys(VOCABULAIRE + extra) if not re.search(r"[<>{}\[\]\\]", m)][:90]
-    t0 = time.time()
+def scribe(audio, extra=()):
+    """Son WAV -> texte (ElevenLabs Scribe). Lève Erreur avec un message simple."""
+    mots = [m for m in dict.fromkeys(VOCABULAIRE + [str(m).strip()[:50] for m in extra if str(m).strip()])
+            if not re.search(r"[<>{}\[\]\\\r\n]", m)][:90]
     derniere = None
     essais = [(m, True) for m in MODELES_SCRIBE if m] + [(m, False) for m in MODELES_SCRIBE if m]
     for modele, avec_mots in essais:
@@ -259,10 +249,9 @@ def api_transcrire():
         req = urllib.request.Request("https://api.elevenlabs.io/v1/speech-to-text", data=corps, method="POST",
                                      headers={"Content-Type": f"multipart/form-data; boundary={limite}", "xi-api-key": CLE_ELEVEN})
         try:
-            r = urllib.request.urlopen(req, timeout=30)
-            d = json.loads(r.read().decode("utf-8"))
-            return jsonify(texte=str(d.get("text") or "").strip()[:500], t_ms=int((time.time() - t0) * 1000), modele=modele,
-                           vocabulaire=avec_mots)
+            with urllib.request.urlopen(req, timeout=30) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            return str(d.get("text") or "").strip()[:500]
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300].replace(CLE_ELEVEN, "***")
             derniere = f"le service a refusé ({e.code}) : {detail}"
@@ -274,7 +263,25 @@ def api_transcrire():
             break
     if derniere and ("401" in derniere or "missing_permissions" in derniere or "permission" in derniere.lower()):
         derniere += " — la clé ElevenLabs n'a pas le droit « Speech to Text » : modifie-la sur elevenlabs.io (Access)."
-    return jsonify(erreur=f"Dictée impossible : {derniere}"), 502
+    raise Erreur(f"Dictée impossible : {derniere}")
+
+
+@app.post("/api/transcrire")
+def api_transcrire():
+    """Le son du micro -> texte, par ElevenLabs Scribe (un vrai outil de dictée : il écrit ce qu'il entend, il
+    n'invente pas de phrase). Marche aussi sur un PC d'entreprise où la dictée de Chrome est bloquée."""
+    if not CLE_ELEVEN:
+        return jsonify(erreur="Pas de clé ElevenLabs"), 400
+    audio = request.get_data(cache=False)
+    if len(audio) < 3000:
+        return jsonify(texte="", t_ms=0)
+    # + les noms du chantier en cours, envoyés par la page (en-tête X-Mots, séparés par « | »)
+    extra = [m.strip()[:50] for m in urllib.parse.unquote(request.headers.get("X-Mots", "")).split("|") if m.strip()]
+    t0 = time.time()
+    try:
+        return jsonify(texte=scribe(audio, extra), t_ms=int((time.time() - t0) * 1000))
+    except Erreur as e:
+        return jsonify(erreur=str(e)), 502
 
 
 CONSIGNE_ASSISTANT = """Tu es Zak, l'assistant vocal de ZAKMETRE (outil qui fait les DPGF et CCTP d'un maître d'œuvre du
@@ -459,12 +466,15 @@ def api_parler():
 #  - les essais de code faux sont limités.
 import hashlib
 import hmac
+import secrets
 import threading
 
 RELAIS_SECRET = os.environ.get("RELAIS_SECRET", "").strip()
 _RELAIS = {}                 # id -> {"n": dernier n°, "msgs": [...], "reps": {n: réponse}, "pc_vu": t, "tel_vu": t, "vu": t}
 _CODES = {}                  # code -> (id, expiration)
 _RATES = []                  # heures des codes faux
+_JETONS = {}                 # jeton -> (texte, voix, expiration, utilisations) : la voix d'UNE réponse, à usage limité
+RE_VOIX = re.compile(r"[A-Za-z0-9]{10,40}")
 _V = threading.Condition()
 RE_ID = re.compile(r"[A-Za-z0-9_-]{16,40}")
 RE_CODE = re.compile(r"[A-Z0-9]{6}")
@@ -509,7 +519,9 @@ def relais_code():
         for k in [k for k, v in _CODES.items() if v[1] < t or v[0] == sid]:
             del _CODES[k]
         _CODES[code] = (sid, t + 600)
-        _liaison(sid)
+        l = _liaison(sid)
+        if l is not None and isinstance(d.get("mots"), list):
+            l["mots"] = [str(x)[:60] for x in d["mots"] if isinstance(x, str)][:60]
     return jsonify(ok=True)
 
 
@@ -554,11 +566,28 @@ def relais_message(sid):
             return jsonify(erreur="Relais plein, réessaie dans un moment."), 503
         l["n"] += 1
         l["tel_vu"] = time.time()
-        l["msgs"].append({"n": l["n"], "audio": audio, "texte": texte})
+        m = {"n": l["n"], "audio": audio, "texte": texte, "etat": "dictee" if audio and CLE_ELEVEN else "pret"}
+        l["msgs"].append(m)
         l["msgs"] = l["msgs"][-5:]
         _V.notify_all()
-        n = l["n"]
+        n, mots = l["n"], list(l.get("mots") or [])
+    if m["etat"] == "dictee":
+        threading.Thread(target=_dicter, args=(m, mots), daemon=True).start()
     return jsonify(n=n, pc_en_ligne=time.time() - l["pc_vu"] < 30)
+
+
+def _dicter(m, mots):
+    """Dictée faite ici, tout de suite : ZAKMETRE reçoit directement le texte (plus rapide qu'envoyer le son au PC).
+    Si la dictée échoue, le son part au PC comme avant (il essaiera lui-même)."""
+    try:
+        texte = scribe(base64.b64decode(m["audio"]), mots)
+        with _V:
+            m.update(texte=texte, audio="", dicte=True, etat="pret")
+            _V.notify_all()
+    except (Erreur, ValueError):
+        with _V:
+            m["etat"] = "pret"
+            _V.notify_all()
 
 
 @app.get("/relais/<sid>/attendre")
@@ -578,13 +607,15 @@ def relais_attendre(sid):
             if l is None:
                 return jsonify(erreur="Relais plein."), 503
             l["pc_vu"] = time.time()
-            nouveaux = [m for m in l["msgs"] if m["n"] > apres]
+            nouveaux = [{k: m[k] for k in ("n", "audio", "texte") if k in m} | {"dicte": bool(m.get("dicte"))}
+                        for m in l["msgs"] if m["n"] > apres and m.get("etat", "pret") == "pret"]
             reste = fin - time.time()
             if nouveaux or reste <= 0 or l["liaisons"] != liaisons:
                 break
             _V.wait(min(reste, 5))
         # n le plus haut connu : au redémarrage du relais, ZAKMETRE repart de là sans rater de message
-        return jsonify(messages=nouveaux, dernier=l["n"], tel_vu=l["tel_vu"])
+        return jsonify(messages=nouveaux, dernier=l["n"], tel_vu=l["tel_vu"],
+                       capacites={"dictee": bool(CLE_ELEVEN), "voix": bool(CLE_ELEVEN)})
 
 
 @app.post("/relais/<sid>/reponse")
@@ -600,15 +631,44 @@ def relais_reponse_pc(sid):
     rep = {"entendu": str(d.get("entendu") or "")[:500], "texte": str(d.get("texte") or "")[:1500],
            "audio": str(d.get("audio") or "")[:2_000_000], "erreur": str(d.get("erreur") or "")[:300],
            "action": str(d.get("action") or "")[:200]}
+    texte_voix, voix = str(d.get("texte_voix") or "")[:1500], str(d.get("voix") or "")
+    if texte_voix and not rep["audio"] and CLE_ELEVEN and RE_VOIX.fullmatch(voix):
+        # la voix sera fabriquée ICI, en flux, quand le téléphone la demande : le son commence tout de suite
+        jeton = secrets.token_urlsafe(18)
+        with _V:
+            t = time.time()
+            for k in [k for k, v in _JETONS.items() if v[2] < t]:
+                del _JETONS[k]
+            _JETONS[jeton] = [texte_voix, voix, t + 300, 0]
+        rep["voix_url"] = f"/relais/voix/{jeton}"
     with _V:
         l = _liaison(sid)
         if l is None:
             return jsonify(erreur="Relais plein."), 503
+        if isinstance(d.get("mots"), list):
+            l["mots"] = [str(x)[:60] for x in d["mots"] if isinstance(x, str)][:60]   # noms pour la dictée suivante
         l["reps"][n] = rep
         for k in sorted(l["reps"])[:-5]:
             del l["reps"][k]
         _V.notify_all()
     return jsonify(ok=True)
+
+
+@app.get("/relais/voix/<jeton>")
+def relais_voix(jeton):
+    with _V:
+        v = _JETONS.get(jeton)
+        if not v or v[2] < time.time() or v[3] >= 5:
+            return jsonify(erreur="Voix expirée."), 404
+        v[3] += 1
+        texte, voix = v[0], v[1]
+    try:
+        r = appel(f"https://api.elevenlabs.io/v1/text-to-speech/{voix}/stream?output_format=mp3_44100_128",
+                  {"text": texte, "model_id": os.environ.get("ZAK_MODELE_VOIX", "eleven_turbo_v2_5")},
+                  {"xi-api-key": CLE_ELEVEN})
+    except Erreur:
+        return jsonify(erreur="Voix indisponible."), 502
+    return Response(_flux(r), mimetype="audio/mpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/relais/<sid>/reponse")
